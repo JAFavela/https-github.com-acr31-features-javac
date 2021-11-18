@@ -17,7 +17,6 @@ package uk.ac.cam.acr31.features.javac;
 
 import static com.google.common.truth.Truth.assertThat;
 
-import com.google.common.base.Joiner;
 import com.google.common.collect.Iterables;
 import java.util.Set;
 import org.junit.Test;
@@ -37,7 +36,7 @@ public class SymbolScannerTest {
     // ARRANGE
     String classLines = "public class Test {}";
     TestCompilation compilation = TestCompilation.compile("Test.java", classLines);
-    SourceSpan clazz = compilation.sourceSpan(classLines);
+    SourceSpan clazz = compilation.sourceSpan("Test");
 
     // ACT
     FeatureGraph graph =
@@ -54,12 +53,13 @@ public class SymbolScannerTest {
     TestCompilation compilation =
         TestCompilation.compile(
             "Test.java", //
+            "package foo.bar;",
             "public class Test {",
             "  static int method(double d) {",
             "    return 1;",
             "  }",
             "}");
-    SourceSpan method = compilation.sourceSpan("static int method(double d) {\n    return 1;\n  }");
+    SourceSpan method = compilation.sourceSpan("method");
 
     // ACT
     FeatureGraph graph =
@@ -67,7 +67,29 @@ public class SymbolScannerTest {
 
     // ASSERT
     FeatureNode symbolNode = findSymbolNode(graph, method);
-    assertThat(symbolNode.getContents()).isEqualTo("method(double)");
+    assertThat(symbolNode.getContents()).isEqualTo("foo.bar.Test.method(double)");
+  }
+
+  @Test
+  public void symbolScanner_attachesSymbolToMethodName_inDefaultPackage() {
+    // ARRANGE
+    TestCompilation compilation =
+        TestCompilation.compile(
+            "Test.java", //
+            "public class Test {",
+            "  static int method(double d) {",
+            "    return 1;",
+            "  }",
+            "}");
+    SourceSpan method = compilation.sourceSpan("method");
+
+    // ACT
+    FeatureGraph graph =
+        FeaturePlugin.createFeatureGraph(compilation.compilationUnit(), compilation.context());
+
+    // ASSERT
+    FeatureNode symbolNode = findSymbolNode(graph, method);
+    assertThat(symbolNode.getContents()).isEqualTo("Test.method(double)");
   }
 
   @Test
@@ -79,7 +101,7 @@ public class SymbolScannerTest {
             "public class Test {",
             "  String a = String.valueOf(1);",
             "}");
-    SourceSpan inv = compilation.sourceSpan("String.valueOf(1)");
+    SourceSpan inv = compilation.sourceSpan("valueOf");
 
     // ACT
     FeatureGraph graph =
@@ -87,7 +109,7 @@ public class SymbolScannerTest {
 
     // ASSERT
     FeatureNode symbolNode = findSymbolNode(graph, inv);
-    assertThat(symbolNode.getContents()).isEqualTo("valueOf(int)");
+    assertThat(symbolNode.getContents()).isEqualTo("java.lang.String.valueOf(int)");
   }
 
   @Test
@@ -108,7 +130,7 @@ public class SymbolScannerTest {
 
     // ASSERT
     FeatureNode symbolNode = findSymbolNode(graph, inv);
-    assertThat(symbolNode.getContents()).isEqualTo("a");
+    assertThat(symbolNode.getContents()).isEqualTo("Test.a");
   }
 
   @Test
@@ -120,7 +142,7 @@ public class SymbolScannerTest {
             "public class Test {",
             "  String a = null;",
             "}");
-    SourceSpan inv = compilation.sourceSpan("a", " = ");
+    SourceSpan inv = compilation.sourceSpan("String ", "a", " = null;");
 
     // ACT
     FeatureGraph graph =
@@ -128,7 +150,143 @@ public class SymbolScannerTest {
 
     // ASSERT
     FeatureNode symbolNode = findSymbolNode(graph, inv);
-    assertThat(symbolNode.getContents()).isEqualTo("a");
+    assertThat(symbolNode.getContents()).isEqualTo("Test.a");
+  }
+
+  @Test
+  public void symbolScanner_attachesSymbolToVariableName_inMethod() {
+    // ARRANGE
+    TestCompilation compilation =
+        TestCompilation.compile(
+            "Test.java", //
+            "public class Test {",
+            "  void f() {",
+            "    String a = null;",
+            "  }",
+            "}");
+    SourceSpan inv = compilation.sourceSpan("String ", "a", " = null;");
+
+    // ACT
+    FeatureGraph graph =
+        FeaturePlugin.createFeatureGraph(compilation.compilationUnit(), compilation.context());
+
+    // ASSERT
+    FeatureNode symbolNode = findSymbolNode(graph, inv);
+    assertThat(symbolNode.getContents()).matches("\\QTest.f().a@\\E\\d+");
+  }
+
+  @Test
+  public void symbolScanner_attachesDifferentNamesToVariables_withSameOwner() {
+    // ARRANGE
+    TestCompilation compilation =
+        TestCompilation.compile(
+            "Test.java", //
+            "public class Test {",
+            "  void f() {",
+            "    {",
+            "      String a = \"\";",
+            "    }",
+            "    {",
+            "      String a = null;",
+            "    }",
+            "  }",
+            "}");
+    SourceSpan inv = compilation.sourceSpan("String ", "a", " = null;");
+    SourceSpan inv2 = compilation.sourceSpan("String ", "a", " = \"\";");
+
+    // ACT
+    FeatureGraph graph =
+        FeaturePlugin.createFeatureGraph(compilation.compilationUnit(), compilation.context());
+
+    // ASSERT
+    FeatureNode symbolNode = findSymbolNode(graph, inv);
+    FeatureNode otherSymbolNode = findSymbolNode(graph, inv2);
+    assertThat(symbolNode.getContents().equals(otherSymbolNode.getContents())).isFalse();
+  }
+
+  @Test
+  public void symbolScanner_attachesDifferentNamesToVariables_withSameOwnerInStaticInitialiser() {
+    // ARRANGE
+    TestCompilation compilation =
+        TestCompilation.compile(
+            "Test.java", //
+            "public class Test {",
+            "  static {",
+            "    {",
+            "      String a = \"\";",
+            "    }",
+            "    {",
+            "      String a = null;",
+            "    }",
+            "  }",
+            "}");
+    SourceSpan inv = compilation.sourceSpan("String ", "a", " = null;");
+    SourceSpan inv2 = compilation.sourceSpan("String ", "a", " = \"\";");
+
+    // ACT
+    FeatureGraph graph =
+        FeaturePlugin.createFeatureGraph(compilation.compilationUnit(), compilation.context());
+
+    // ASSERT
+    FeatureNode symbolNode = findSymbolNode(graph, inv);
+    FeatureNode otherSymbolNode = findSymbolNode(graph, inv2);
+    assertThat(symbolNode.getContents().equals(otherSymbolNode.getContents())).isFalse();
+  }
+
+  @Test
+  public void symbolScanner_attachesDifferentNamesToClasses_withSameOwner() {
+    // ARRANGE
+    TestCompilation compilation =
+        TestCompilation.compile(
+            "Test.java", //
+            "public class Test {",
+            "  void f() {",
+            "    {",
+            "      class A {} // 1",
+            "    }",
+            "    {",
+            "      class A {} // 2",
+            "    }",
+            "  }",
+            "}");
+    SourceSpan inv = compilation.sourceSpan("class ", "A", " {} // 1");
+    SourceSpan inv2 = compilation.sourceSpan("class ", "A", " {} // 2");
+
+    // ACT
+    FeatureGraph graph =
+        FeaturePlugin.createFeatureGraph(compilation.compilationUnit(), compilation.context());
+
+    // ASSERT
+    FeatureNode symbolNode = findSymbolNode(graph, inv);
+    FeatureNode otherSymbolNode = findSymbolNode(graph, inv2);
+    assertThat(symbolNode.getContents().equals(otherSymbolNode.getContents())).isFalse();
+  }
+
+  @Test
+  public void symbolScanner_attachesSameSymbol_toSameVariable() {
+    // ARRANGE
+    TestCompilation compilation =
+        TestCompilation.compile(
+            "Test.java", //
+            "public class Test {",
+            "  void f() {",
+            "    int x = 0;",
+            "    {",
+            "      x = 4;",
+            "    }",
+            "  }",
+            "}");
+    SourceSpan decl = compilation.sourceSpan("int ", "x", " = 0;");
+    SourceSpan use = compilation.sourceSpan("x", " = 4;");
+
+    // ACT
+    FeatureGraph graph =
+        FeaturePlugin.createFeatureGraph(compilation.compilationUnit(), compilation.context());
+
+    // ASSERT
+    FeatureNode declNode = findSymbolNode(graph, decl);
+    FeatureNode useNode = findSymbolNode(graph, use);
+    assertThat(declNode.equals(useNode)).isTrue();
   }
 
   @Test
@@ -143,7 +301,7 @@ public class SymbolScannerTest {
             "    a = 1;",
             "  }",
             "}");
-    SourceSpan decl = compilation.sourceSpan("int ", "a", " = ");
+    SourceSpan decl = compilation.sourceSpan("int ", "a", " = 0;");
     SourceSpan use = compilation.sourceSpan("a", " = 1");
 
     // ACT
@@ -167,7 +325,7 @@ public class SymbolScannerTest {
       "}"
     };
     TestCompilation compilation = TestCompilation.compile("Test.java", classLines);
-    SourceSpan decl = compilation.sourceSpan(Joiner.on("\n").join(classLines));
+    SourceSpan decl = compilation.sourceSpan("public class ", "Test", " {");
     SourceSpan use = compilation.sourceSpan("Test", " t;");
 
     // ACT
@@ -192,8 +350,8 @@ public class SymbolScannerTest {
             "    foo();",
             "  }",
             "}");
-    SourceSpan decl = compilation.sourceSpan("void foo() {}");
-    SourceSpan use = compilation.sourceSpan("foo()", ";");
+    SourceSpan decl = compilation.sourceSpan("void ", "foo", "() {}");
+    SourceSpan use = compilation.sourceSpan("foo", "();");
 
     // ACT
     FeatureGraph graph =
@@ -228,6 +386,47 @@ public class SymbolScannerTest {
     FeatureNode declSymbol = findSymbolNode(graph, declField);
     FeatureNode useSymbol = findSymbolNode(graph, declLocal);
     assertThat(declSymbol).isNotEqualTo(useSymbol);
+  }
+
+  @Test
+  public void symbolScanner_getsName_forImportedPackage() {
+    // ARRANGE
+    TestCompilation compilation =
+        TestCompilation.compile(
+            "Test.java",
+            "import java.util.List;", //
+            "public class Test {}");
+    SourceSpan pckge = compilation.sourceSpan("java.", "util", ".List");
+
+    // ACT
+    FeatureGraph graph =
+        FeaturePlugin.createFeatureGraph(compilation.compilationUnit(), compilation.context());
+
+    // ASSERT
+    FeatureNode symbol = findSymbolNode(graph, pckge);
+    assertThat(symbol.getContents()).isEqualTo("java.util");
+  }
+
+  @Test
+  public void symbolScanner_associatesMethodSymbol_withMethodInInnerClass() {
+    // ARRANGE
+    TestCompilation compilation =
+        TestCompilation.compile(
+            "Test.java",
+            "public class Test {", //
+            "  Object o = new Object() {",
+            "    void innerMethod() {}",
+            "  };",
+            "}");
+    SourceSpan innerMethod = compilation.sourceSpan("void ", "innerMethod", "()");
+
+    // ACT
+    FeatureGraph graph =
+        FeaturePlugin.createFeatureGraph(compilation.compilationUnit(), compilation.context());
+
+    // ASSERT
+    FeatureNode symbol = findSymbolNode(graph, innerMethod);
+    assertThat(symbol.getContents()).isEqualTo("Test$1.innerMethod()");
   }
 
   private FeatureNode findSymbolNode(FeatureGraph graph, SourceSpan sourceSpan) {

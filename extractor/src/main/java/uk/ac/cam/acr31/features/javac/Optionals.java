@@ -14,21 +14,22 @@
  * limitations under the License.
  */
 
-package uk.ac.cam.acr31.features.javac.graph;
+package uk.ac.cam.acr31.features.javac;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
+import java.util.Optional;
+import java.util.function.BiConsumer;
 
-/** Static methods for writing proto files. */
-public class ProtoOutput {
+public class Optionals {
 
-  /** Write this feature graph to the given output file. */
-  public static void write(File outputFile, FeatureGraph featureGraph) {
-    try (FileOutputStream fos = new FileOutputStream(outputFile)) {
-      featureGraph.toProtobuf().writeTo(fos);
-    } catch (IOException e) {
-      throw new RuntimeException("Failed to write protobuf", e);
+  /** Execute the given function if both optionals are present. */
+  public static <U, V> void ifBothPresent(
+      Optional<U> first, Optional<V> second, BiConsumer<U, V> consumer) {
+    if (first.isPresent() && second.isPresent()) {
+      consumer.accept(first.get(), second.get());
     }
+  }
+
+  private Optionals() {
+    // no instances
   }
 }

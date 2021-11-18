@@ -14,12 +14,19 @@
  * limitations under the License.
  */
 
-package uk.ac.cam.acr31.features.javac.graph;
+package uk.ac.cam.acr31.features.javac.dot;
 
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static uk.ac.cam.acr31.features.javac.proto.GraphProtos.FeatureNode.NodeType.IDENTIFIER_TOKEN;
+import static uk.ac.cam.acr31.features.javac.proto.GraphProtos.FeatureNode.NodeType.METHOD_SIGNATURE;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
 import com.google.common.graph.EndpointPair;
+import com.google.common.graph.ImmutableNetwork;
+import com.google.common.graph.MutableNetwork;
+import com.google.common.graph.NetworkBuilder;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -30,44 +37,72 @@ import org.apache.commons.text.StringEscapeUtils;
 import uk.ac.cam.acr31.features.javac.proto.GraphProtos.FeatureEdge;
 import uk.ac.cam.acr31.features.javac.proto.GraphProtos.FeatureEdge.EdgeType;
 import uk.ac.cam.acr31.features.javac.proto.GraphProtos.FeatureNode;
+import uk.ac.cam.acr31.features.javac.proto.GraphProtos.Graph;
+import uk.ac.cam.acr31.features.javac.proto.NodeTypes;
 
 public class DotOutput {
 
-  public static void writeToDot(File outputFile, FeatureGraph graph, boolean verboseDot) {
+  /** Write this graph to a dot file. */
+  public static void writeToDot(File outputFile, Graph graph, boolean verboseDot)
+      throws IOException {
     try (FileWriter w = new FileWriter(outputFile)) {
-      w.write(createDot(graph, verboseDot));
-
-    } catch (IOException e) {
-      throw new RuntimeException(e);
+      w.write(createDot(graph, indexGraph(graph), verboseDot));
     }
   }
 
-  public static String createDot(FeatureGraph graph, boolean verboseDot) {
+  private static ImmutableNetwork<FeatureNode, FeatureEdge> indexGraph(Graph graph) {
+    MutableNetwork<FeatureNode, FeatureEdge> result =
+        NetworkBuilder.directed().allowsSelfLoops(true).allowsParallelEdges(true).build();
+    ImmutableMap<Long, FeatureNode> nodeMap =
+        Maps.uniqueIndex(graph.getNodeList(), FeatureNode::getId);
+    for (FeatureEdge edge : graph.getEdgeList()) {
+      FeatureNode src = nodeMap.get(edge.getSourceId());
+      FeatureNode dest = nodeMap.get(edge.getDestinationId());
+      result.addEdge(src, dest, edge);
+    }
+    return ImmutableNetwork.copyOf(result);
+  }
+
+  /** Write this graph to a dot file. */
+  private static String createDot(
+      Graph graph, ImmutableNetwork<FeatureNode, FeatureEdge> index, boolean verboseDot) {
     StringWriter result = new StringWriter();
     try (PrintWriter w = new PrintWriter(result)) {
       w.println("digraph {");
       w.println(" rankdir=LR;");
 
-      Set<FeatureNode> nodeSet = ImmutableSet.of(graph.root());
+      Set<FeatureNode> nodeSet = ImmutableSet.of(graph.getAstRoot());
       while (!nodeSet.isEmpty()) {
         writeSubgraph(w, nodeSet, "same", verboseDot);
-        nodeSet = getAstChildren(nodeSet, graph);
+        nodeSet = getAstChildren(nodeSet, graph, index);
       }
 
-      Set<FeatureNode> commentSet = graph.comments();
+      Set<FeatureNode> commentSet =
+          graph.getNodeList().stream()
+              .filter(n -> NodeTypes.isComment(n.getType()))
+              .collect(toImmutableSet());
       writeSubgraph(w, commentSet, null, verboseDot);
 
-      Set<FeatureNode> symbolSet = graph.symbols();
-      writeSubgraph(w, symbolSet, null, verboseDot);
+      Set<FeatureNode> symbolSet =
+          graph.getNodeList().stream()
+              .filter(n -> NodeTypes.isSymbol(n.getType()))
+              .collect(toImmutableSet());
+      writeSubgraph(w, symbolSet, "max", verboseDot);
 
-      Set<FeatureNode> tokenSet = graph.tokens();
-      writeSubgraph(w, tokenSet, "max", verboseDot);
+      Set<FeatureNode> signatureSet =
+          graph.getNodeList().stream()
+              .filter(n -> n.getType().equals(METHOD_SIGNATURE))
+              .collect(toImmutableSet());
+      writeSubgraph(w, signatureSet, null, verboseDot);
 
-      Set<FeatureNode> typeSet = graph.types();
-      writeSubgraph(w, typeSet, "min", verboseDot);
+      Set<FeatureNode> tokenSet =
+          graph.getNodeList().stream()
+              .filter(n -> NodeTypes.isToken(n.getType()))
+              .collect(toImmutableSet());
+      writeSubgraph(w, tokenSet, "same", verboseDot);
 
-      for (FeatureEdge edge : graph.edges()) {
-        w.println(dotEdge(edge, graph.incidentNodes(edge)));
+      for (FeatureEdge edge : graph.getEdgeList()) {
+        w.println(dotEdge(edge, index.incidentNodes(edge)));
       }
 
       w.println("}");
@@ -145,8 +180,7 @@ public class DotOutput {
         }
         break;
       case HAS_TYPE:
-        ports = "headport=e, tailport=w, color=grey, weight=0";
-        break;
+        return "";
       case ASSIGNABLE_TO:
         ports = "headport=e, tailport=w, color=brown, weight=0";
         break;
@@ -166,10 +200,16 @@ public class DotOutput {
     w.println(" }");
   }
 
-  private static Set<FeatureNode> getAstChildren(Set<FeatureNode> nodeSet, FeatureGraph graph) {
+  private static Set<FeatureNode> getAstChildren(
+      Set<FeatureNode> nodeSet, Graph graph, ImmutableNetwork<FeatureNode, FeatureEdge> index) {
     ImmutableSet.Builder<FeatureNode> result = ImmutableSet.builder();
     for (FeatureNode node : nodeSet) {
-      graph.successors(node, EdgeType.AST_CHILD).forEach(result::add);
+      index.successors(node).stream()
+          .filter(
+              n ->
+                  index.edgesConnecting(node, n).stream()
+                      .anyMatch(e -> e.getType().equals(EdgeType.AST_CHILD)))
+          .forEach(result::add);
     }
     return result.build();
   }

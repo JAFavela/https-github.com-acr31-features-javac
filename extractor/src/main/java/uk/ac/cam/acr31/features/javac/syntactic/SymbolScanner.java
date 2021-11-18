@@ -16,7 +16,8 @@
 
 package uk.ac.cam.acr31.features.javac.syntactic;
 
-import com.google.errorprone.util.ASTHelpers;
+import static uk.ac.cam.acr31.features.javac.Optionals.ifBothPresent;
+
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.IdentifierTree;
@@ -24,10 +25,13 @@ import com.sun.source.tree.MemberSelectTree;
 import com.sun.source.tree.MethodInvocationTree;
 import com.sun.source.tree.MethodTree;
 import com.sun.source.tree.NewClassTree;
+import com.sun.source.tree.PackageTree;
 import com.sun.source.tree.Tree;
 import com.sun.source.tree.VariableTree;
 import com.sun.source.util.TreeScanner;
 import com.sun.tools.javac.code.Symbol;
+import java.util.Optional;
+import uk.ac.cam.acr31.features.javac.Symbols;
 import uk.ac.cam.acr31.features.javac.graph.FeatureGraph;
 import uk.ac.cam.acr31.features.javac.proto.GraphProtos.FeatureEdge.EdgeType;
 import uk.ac.cam.acr31.features.javac.proto.GraphProtos.FeatureNode;
@@ -49,73 +53,78 @@ public class SymbolScanner extends TreeScanner<Void, Void> {
 
   @Override
   public Void visitClass(ClassTree node, Void ignored) {
+    Void result = super.visitClass(node, ignored);
     addNode(node);
-    return super.visitClass(node, ignored);
+    return result;
   }
 
   @Override
   public Void visitNewClass(NewClassTree node, Void ignored) {
+    Void result = super.visitNewClass(node, ignored);
     addNode(node);
-    return super.visitNewClass(node, ignored);
+    return result;
   }
 
   @Override
   public Void visitMethod(MethodTree node, Void ignored) {
+    Void result = super.visitMethod(node, ignored);
     addNode(node);
-    return super.visitMethod(node, ignored);
+    return result;
   }
 
   @Override
   public Void visitMethodInvocation(MethodInvocationTree node, Void ignored) {
+    Void result = super.visitMethodInvocation(node, ignored);
     addNode(node);
-    return super.visitMethodInvocation(node, ignored);
+    return result;
   }
 
   @Override
   public Void visitIdentifier(IdentifierTree node, Void ignored) {
+    Void result = super.visitIdentifier(node, ignored);
     addNode(node);
-    return super.visitIdentifier(node, ignored);
+    return result;
   }
 
   @Override
   public Void visitMemberSelect(MemberSelectTree node, Void ignored) {
+    Void result = super.visitMemberSelect(node, ignored);
     addNode(node);
-    return super.visitMemberSelect(node, ignored);
+    return result;
   }
 
   @Override
   public Void visitVariable(VariableTree node, Void ignored) {
+    Void result = super.visitVariable(node, ignored);
     addNode(node);
-    return super.visitVariable(node, ignored);
+    return result;
+  }
+
+  @Override
+  public Void visitPackage(PackageTree node, Void ignored) {
+    Void result = super.visitPackage(node, ignored);
+    addNode(node);
+    return result;
   }
 
   private void addNode(Tree node) {
-    Symbol symbol = ASTHelpers.getSymbol(node);
-    if (symbol == null) {
-      return;
-    }
-
-    FeatureNode target = featureGraph.lookupNode(node);
-    if (target == null) {
-      return;
-    }
-
-    FeatureNode featureNode = featureGraph.createFeatureNode(toSymbolType(symbol), symbol);
-
-    // If its a variable node push the symbol down on to the identifier for the variable
-    if (node instanceof VariableTree) {
-      target = featureGraph.toIdentifierNode(target);
-    }
-
+    Optional<FeatureNode> featureNode =
+        Symbols.getSymbol(node).map(sym -> featureGraph.createFeatureNode(toSymbolType(sym), sym));
+    Optional<FeatureNode> target =
+        Optional.ofNullable(featureGraph.lookupNode(node)).map(featureGraph::toIdentifierNode);
     // If your code says: String a = "a", b = "b", then javac synths up some extra ast nodes along
     // the lines of String a = "a"; String b = "b";  some of the extra nodes will be clones, some
     // (leaves) will just be the same node reused.  In this case we will visit String twice even
     // though both times point to the same token so just check that there is no edge before adding
     // another.
-
-    if (featureGraph.predecessors(target, EdgeType.ASSOCIATED_SYMBOL).isEmpty()) {
-      featureGraph.addEdge(featureNode, target, EdgeType.ASSOCIATED_SYMBOL);
-    }
+    ifBothPresent(
+        featureNode,
+        target,
+        (f, t) -> {
+          if (featureGraph.predecessors(t, EdgeType.ASSOCIATED_SYMBOL).isEmpty()) {
+            featureGraph.addEdge(f, t, EdgeType.ASSOCIATED_SYMBOL);
+          }
+        });
   }
 
   private static NodeType toSymbolType(Symbol symbol) {

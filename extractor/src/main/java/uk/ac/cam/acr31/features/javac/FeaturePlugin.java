@@ -36,8 +36,8 @@ import java.io.File;
 import java.io.IOError;
 import java.io.IOException;
 import java.util.Comparator;
+import java.util.Optional;
 import java.util.Set;
-import uk.ac.cam.acr31.features.javac.graph.DotOutput;
 import uk.ac.cam.acr31.features.javac.graph.FeatureGraph;
 import uk.ac.cam.acr31.features.javac.graph.ProtoOutput;
 import uk.ac.cam.acr31.features.javac.lexical.Tokens;
@@ -60,8 +60,6 @@ public class FeaturePlugin implements Plugin {
 
   private static final String FEATURES_OUTPUT_DIRECTORY = "featuresOutputDirectory";
   private static final String ABORT_ON_ERROR = "abortOnError";
-  private static final String VERBOSE_DOT = "verboseDot";
-  private static final String DOT_OUTPUT = "dotOutput";
 
   @Override
   public String getName() {
@@ -91,8 +89,6 @@ public class FeaturePlugin implements Plugin {
     Options options = Options.instance(context);
 
     boolean abortOnError = options.getBoolean(ABORT_ON_ERROR);
-    boolean verboseDot = options.getBoolean(VERBOSE_DOT);
-    boolean dotOutput = options.getBoolean(DOT_OUTPUT, true);
     String featuresOutputDirectory = ".";
     if (options.isSet(FEATURES_OUTPUT_DIRECTORY)) {
       featuresOutputDirectory = options.get(FEATURES_OUTPUT_DIRECTORY);
@@ -103,7 +99,7 @@ public class FeaturePlugin implements Plugin {
 
     try {
       FeatureGraph featureGraph = createFeatureGraph(compilationUnit, context);
-      writeOutput(featureGraph, featuresOutputDirectory, verboseDot, dotOutput);
+      writeOutput(featureGraph, featuresOutputDirectory);
     } catch (AssertionError | RuntimeException e) {
       String message = "Feature extraction failed: " + taskEvent.getSourceFile().getName();
       if (abortOnError) {
@@ -124,19 +120,7 @@ public class FeaturePlugin implements Plugin {
     }
   }
 
-  private static void writeOutput(
-      FeatureGraph featureGraph,
-      String featuresOutputDirectory,
-      boolean verboseDot,
-      boolean dotOutput) {
-
-    if (dotOutput) {
-      File outputFile =
-          new File(featuresOutputDirectory, featureGraph.getSourceFileName() + ".dot");
-      mkdirFor(outputFile);
-      DotOutput.writeToDot(outputFile, featureGraph, verboseDot);
-    }
-
+  private static void writeOutput(FeatureGraph featureGraph, String featuresOutputDirectory) {
     File protoFile = new File(featuresOutputDirectory, featureGraph.getSourceFileName() + ".proto");
     mkdirFor(protoFile);
     ProtoOutput.write(protoFile, featureGraph);
@@ -154,8 +138,7 @@ public class FeaturePlugin implements Plugin {
     linkTokensToAstNodes(featureGraph);
     // prune all ast nodes with no successors (these are leaves not connected to tokens)
     featureGraph.pruneAstNodes();
-
-    removeIdentifierAstNodes(featureGraph);
+    //    removeIdentifierAstNodes(featureGraph);
 
     JavacProcessingEnvironment processingEnvironment = JavacProcessingEnvironment.instance(context);
     ImmutableMap<ClassTree, ImmutableMap<MethodTree, DataflowOutputs>> analysisResults =
@@ -173,8 +156,28 @@ public class FeaturePlugin implements Plugin {
     GuardedByScanner.addToGraph(compilationUnit, featureGraph);
     SymbolScanner.addToGraph(compilationUnit, featureGraph);
     linkCommentsToAstNodes(featureGraph);
+    checkSymbols(featureGraph);
 
     return featureGraph;
+  }
+
+  /**
+   * Check that all identifier tokens have a symbol associated.
+   *
+   * <p>This excludes tokens within the package declaration since javac only allocates a symbol to
+   * the whole package.
+   */
+  private static void checkSymbols(FeatureGraph graph) {
+    graph.nodes().stream()
+        .filter(n -> n.getType().equals(NodeType.IDENTIFIER_TOKEN))
+        .filter(n -> !graph.hasAncestor(n, NodeType.AST_ELEMENT, "PACKAGE"))
+        .filter(n -> !graph.hasAncestor(n, NodeType.AST_ELEMENT, "LABELED_STATEMENT"))
+        .forEach(
+            token -> {
+              if (graph.predecessors(token, EdgeType.ASSOCIATED_SYMBOL).isEmpty()) {
+                throw new AssertionError(token + " has no associated symbol");
+              }
+            });
   }
 
   private static void removeIdentifierAstNodes(FeatureGraph graph) {
@@ -241,24 +244,56 @@ public class FeaturePlugin implements Plugin {
               JCTree.JCVariableDecl variableTree =
                   (JCTree.JCVariableDecl) featureGraph.lookupTree(node);
               Name expectedName = variableTree.getName();
-              astNodes.tailSet(node).stream()
-                  .filter(target -> target.getType().equals(NodeType.IDENTIFIER_TOKEN))
-                  .filter(target -> expectedName.contentEquals(target.getContents()))
-                  .findFirst()
-                  .ifPresent(
-                      target -> featureGraph.addEdge(node, target, EdgeType.ASSOCIATED_TOKEN));
+              Optional<FeatureNode> matchingToken =
+                  astNodes.tailSet(node).stream()
+                      .filter(target -> target.getType().equals(NodeType.IDENTIFIER_TOKEN))
+                      .filter(target -> expectedName.contentEquals(target.getContents()))
+                      .findFirst();
+              matchingToken.ifPresent(
+                  token ->
+                      findMatchingLeaf(node, token, featureGraph)
+                          .ifPresent(
+                              leaf ->
+                                  featureGraph.addEdge(leaf, token, EdgeType.ASSOCIATED_TOKEN)));
             });
 
     for (FeatureNode token : featureGraph.tokens()) {
       if (!featureGraph.predecessors(token, EdgeType.ASSOCIATED_TOKEN).isEmpty()) {
         continue;
       }
-      astNodes.headSet(token).stream()
-          .filter(n -> n.getType().equals(NodeType.AST_ELEMENT))
-          .filter(n -> n.getEndPosition() >= token.getEndPosition())
-          .min(Comparator.comparing(n -> n.getEndPosition() - n.getStartPosition()))
-          .ifPresent(n -> featureGraph.addEdge(n, token, EdgeType.ASSOCIATED_TOKEN));
+      Comparator<FeatureNode> nodeSpan =
+          Comparator.comparing(n -> n.getEndPosition() - n.getStartPosition());
+      Comparator<FeatureNode> nodeId = Comparator.comparingLong(FeatureNode::getId).reversed();
+      Optional<FeatureNode> smallestEncompassingNode =
+          astNodes.headSet(token).stream()
+              .filter(n -> n.getType().equals(NodeType.AST_ELEMENT))
+              .filter(n -> n.getEndPosition() >= token.getEndPosition())
+              .min(nodeSpan.thenComparing(nodeId));
+      if (smallestEncompassingNode.isPresent()) {
+        Optional<FeatureNode> matchingLeaf =
+            findMatchingLeaf(smallestEncompassingNode.get(), token, featureGraph);
+        if (matchingLeaf.isPresent()) {
+          featureGraph.addEdge(matchingLeaf.get(), token, EdgeType.ASSOCIATED_TOKEN);
+        } else {
+          featureGraph.addEdge(smallestEncompassingNode.get(), token, EdgeType.ASSOCIATED_TOKEN);
+        }
+      }
     }
+  }
+
+  private static Optional<FeatureNode> findMatchingLeaf(
+      FeatureNode current, FeatureNode token, FeatureGraph graph) {
+    for (FeatureNode child : graph.successors(current, EdgeType.AST_CHILD)) {
+      if (child.getType() == NodeType.FAKE_AST) {
+        for (FeatureNode possibleLeaf : graph.successors(child, EdgeType.AST_CHILD)) {
+          if (possibleLeaf.getType() == NodeType.AST_LEAF
+              && possibleLeaf.getContents().equalsIgnoreCase(token.getContents())) {
+            return Optional.of(possibleLeaf);
+          }
+        }
+      }
+    }
+    return Optional.empty();
   }
 
   /**
